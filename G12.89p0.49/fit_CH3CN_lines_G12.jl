@@ -17,6 +17,9 @@ using CairoMakie
 using LaTeXStrings
 #using BlackBoxOptim
 
+# example of command to run the script:
+# julia -t 14 --heap-size-hint=80% --check-bounds=no fit_CH3CN_lines_G12.jl &> log.txt 
+
 Random.seed!(11051989)
 
 const DATA_DIR = "G12"
