@@ -71,6 +71,10 @@ if !isdir(DATA_DIR)
     mkdir(DATA_DIR)
 end
 
+if !isdir(joinpath(DATA_DIR, "figures/"))
+    mkdir(joinpath(DATA_DIR, "figures/"))
+end
+
 if !isdir(joinpath(DATA_DIR, "figures/spectra/"))
     mkdir(joinpath(DATA_DIR, "figures/spectra/"))
 end
