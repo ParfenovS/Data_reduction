@@ -1502,8 +1502,8 @@ function main()
     frequencies = collect(header["CRVAL3"] .+ header["CDELT3"] .* (channels .- header["CRPIX3"]))
     frequencies = frequencies ./ 1e9
     # Conversion factor
-    #from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (header["BMAJ"] * header["BMIN"] * 3600 * 3600)
-    from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (0.256446 * 0.198353)
+    from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (header["BMAJ"] * header["BMIN"] * 3600 * 3600)
+    #from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (0.256446 * 0.198353)
     FITSIO.close(hdul)
 
     # Loop through the image data dimensions
