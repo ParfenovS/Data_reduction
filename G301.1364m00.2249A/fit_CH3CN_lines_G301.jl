@@ -4,7 +4,6 @@ using LinearAlgebra
 using Random
 using Distributions
 using MCMCDiagnosticTools
-using KernelDensity
 using ThreadTools
 using Serialization
 using DelimitedFiles
@@ -17,7 +16,7 @@ using CairoMakie
 using LaTeXStrings
 
 # example of command to run the script:
-# julia -t 14 --heap-size-hint=80% --check-bounds=no fit_CH3CN_lines_G301.jl &> log.txt 
+# julia -t 14 --heap-size-hint=80% --check-bounds=no fit_CH3CN_lines_G301.jl &> log.txt
 
 Random.seed!(11051989)
 
@@ -43,20 +42,20 @@ const MODEL_FREQ_INDEXES_TO_NOT_INCLUDE_IN_ABSENT_LINE_LIST = []
 const MODEL_FREQ_INDEXES_TO_NOT_INCLUDE_IN_PHYSICAL_COND_ESTIMATION = []
 const MODEL_FREQ_INDEX_FOR_OPTICAL_DEPTH_OUTPUT = 5
 
-const FITS_FILE = "G301.14AB_B6_12M_robust0_spw3.image_cut_channel.fits"
-const FITS_FOR_NOISE_ESTIMATES = "G301.14AB_B6_12M_robust0_spw3.image_cut_all_channels.fits"
+const FITS_FILE = "G301_CH3CN_lines_cut_channel.fits"
+const FITS_FOR_NOISE_ESTIMATES = "G301_CH3CN_lines_cut_all_channels.fits"
 const CONT_CHANNELS_FOR_NOISE_ESTIMATES = "180~420;715~740;825~835;975~990;1105~1135;1325~1340;1370~1425;1510~1555;1650~1665;1845~1900"
 
 const HDENSITIES0 = collect(3.0:0.05:10.0) # [log cm^-3]
 const GAS_TEMPERATURES = collect(20:2:620) # [K]
 const SPECIFIC_COLUMN_DENSITIES = collect(8.5:0.05:14.6) # [log cm^-3 s]
 const FHII_ARRAY = [0.0, 1.0]
-const TURNOVER_FREQS = collect(7.0:0.5:11.0) # [Hz]
+const EMISSION_MEASURES = collect(7.0:0.5:11.0) # [log pc cm^-6]
 const MOLECULAR_ABUNDANCE = 1.e-6 # wrt H2
 const MINIMUM_CLOUD_SIZE_PROJECTED_ON_SKY = 100. * 1.496e+13 # [cm]
 const MAXIMUM_CLOUD_SIZE_PROJECTED_ON_SKY = 1.0 * 3.086e+18 # [cm]
 const MAX_SPECIFIC_COLUMN_DENSITY = 13.0 # [log cm^-3 s]
-const MAX_GAS_TEMPERATURE = 350.0 # [K]
+const MAX_GAS_TEMPERATURE = 250.0 # [K]
 
 const Au = [0.000990395135789911, 0.00110389118829946, 0.00120253370571844, 0.00135430430571709, 0.00140770247611782, 0.00144561468000315 ,0.00146876639585622, 0.00147610989246408]
 const gu = [58.0, 58.0, 116.0, 58.0, 116.0, 58.0, 58.0, 58.0]
@@ -172,12 +171,12 @@ const HDENSITIES = reverse(sort(HDENSITIES0))
 const DlogN_dV = SPECIFIC_COLUMN_DENSITIES[2] - SPECIFIC_COLUMN_DENSITIES[1]
 const DlognH = HDENSITIES[2] - HDENSITIES[1]
 const DTg = GAS_TEMPERATURES[2] - GAS_TEMPERATURES[1]
-const DlogFreq = TURNOVER_FREQS[2] - TURNOVER_FREQS[1]
+const DlogFreq = EMISSION_MEASURES[2] - EMISSION_MEASURES[1]
 const DFHII = FHII_ARRAY[2] - FHII_ARRAY[1]
 
 const len_nH = length(HDENSITIES)
 const len_Tg = length(GAS_TEMPERATURES)
-const len_Freq = length(TURNOVER_FREQS)
+const len_Freq = length(EMISSION_MEASURES)
 const len_fHII = length(FHII_ARRAY)
 
 function get_models_grid_frequency_values(filename)
@@ -884,11 +883,19 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
         CairoMakie.hlines!(axs, [threshold], color = :black, linestyle = :dash)
     end
 
-    CairoMakie.scatter!(axs, obs_X0, obs_Y0, color=:black, label="observations", markersize = 14)
+    line_freq0 = 220.
+    for key in keys(LINE_VERTICAL_LABELS)
+        if obs_X0[1] <= LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5) <= obs_X0[end]
+            line_freq0 = LINE_VERTICAL_LABELS[key]
+        end
+    end
+
+    CairoMakie.scatter!(axs, (1 .- obs_X0 ./ line_freq0) .* 3.e5, obs_Y0, color=:black, label="observations", markersize = 14)
 
     if length(all_models) > 0
         models = sort!(all_models, by = x -> x.p[2])
         xrange = collect(range(obs_X0[1], stop = obs_X0[end], length = 10000))
+        xrange_vel = (1 .- xrange ./ line_freq0) .* 3.e5
         difference = copy(obs_Y0)
         total_model = zeros(length(xrange))
         for model in models
@@ -896,25 +903,35 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
             difference .-= gauss_profile(obs_X0, model.p)
         end
 
-        CairoMakie.lines!(axs, xrange, total_model, color = :green, label = "total model")
-        CairoMakie.lines!(axs, obs_X0, difference, color = :blue, label = "difference")
+        CairoMakie.lines!(axs, xrange_vel, total_model, color = :green, label = "total model")
+        CairoMakie.lines!(axs, (1 .- obs_X0 ./ line_freq0) .* 3.e5, difference, color = :blue, label = "difference")
 
         for (i, model) in enumerate(models)
             if i == 1
-                CairoMakie.lines!(axs, xrange, gauss_profile(xrange, model.p), color = :red, label = (i == 1 ? "single model" : ""))
+                CairoMakie.lines!(axs, xrange_vel, gauss_profile(xrange, model.p), color = :red, label = (i == 1 ? "single model" : ""))
             else
-                CairoMakie.lines!(axs, xrange, gauss_profile(xrange, model.p), color = :red)
+                CairoMakie.lines!(axs, xrange_vel, gauss_profile(xrange, model.p), color = :red)
             end
             #CairoMakie.errorbars!(axs, [model.p[2]], [model.p[1]], [model.err_p[1]]; color = :red)
         end
     end
-    #ymax = axs.finallimits[].origin[2] + axs.finallimits[].widths[2]
+    
     ymax = maximum(obs_Y0)
+    if HII_is_at_LOS
+        ymax = minimum(obs_Y0)
+    end        
     for key in keys(LINE_VERTICAL_LABELS)
         if obs_X0[1] <= LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5) <= obs_X0[end]
-            CairoMakie.vlines!(axs, [LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5)], color = :black, linestyle = :dot)
+            #CairoMakie.vlines!(axs, [LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5)], color = :black, linestyle = :dot)
             line_K = get_K_from_line_label(key)
-            CairoMakie.text!(axs, LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5), ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 14, rotation = 0, space = :data)
+            #CairoMakie.text!(axs, LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5), ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 14, rotation = 0, space = :data)
+            if LINE_VERTICAL_LABELS[key] == 257.5273839
+                CairoMakie.vlines!(axs, [VLSR_IN_KMS + (257.5273839-257.5224279)/257.5273839*3.e5], color = :black, linestyle = :dot)
+                CairoMakie.text!(axs, VLSR_IN_KMS + (257.5273839-257.5224279)/257.5273839*3.e5, ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 18, rotation = 0, space = :data)
+            else
+                CairoMakie.vlines!(axs, [VLSR_IN_KMS], color = :black, linestyle = :dot)
+                CairoMakie.text!(axs, VLSR_IN_KMS, ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 18, rotation = 0, space = :data)
+            end
         end
     end
     return models, axs
@@ -1067,7 +1084,7 @@ function get_needed_gaussians_and_vlsr(models)
 end
 
 function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
-    figs = CairoMakie.Figure(size = (1500, 1200), fontsize=18)
+    figs = CairoMakie.Figure(size = (1500, 1200), fontsize=24)
     fig = figs[1, 1] = CairoMakie.GridLayout()
     gaussians = []
     all_gaussians = []
@@ -1111,8 +1128,9 @@ function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
     end
     fig_row, fig_col = one_to_two_dim(length(axes_arr)+1)
     lock(plotting_lock) do
-        axes_arr[two_to_one_dim(max_row, 1)].xlabel = "Frequency, GHz"
-        axes_arr[two_to_one_dim(max_row, 1)].ylabel = "Intensity, K"
+        #axes_arr[two_to_one_dim(max_row, 1)].xlabel = "Frequency, GHz"
+        axes_arr[two_to_one_dim(max_row, 1)].xlabel = "Velocity, km/s"
+        axes_arr[two_to_one_dim(max_row, 1)].ylabel = "Brightness temperature, K"
         #CairoMakie.Legend(fig[fig_row, fig_col], axes_arr[end])
         axes_arr[1].title = "Cell id = $cell_id"
     end
@@ -1192,7 +1210,7 @@ function perform_rotational_analysis(freq::Vector{Float64}, Eu::Vector{Float64},
 
     lgNu_mod, ln_Nu_gu, ln_Nu_gu_err = get_model_and_obs_lnNu_gu(res_modified[1], res_modified[2], res_modified[3])
 
-    fig = CairoMakie.Figure(size = (1500, 1200), fontsize=18)
+    fig = CairoMakie.Figure(size = (1500, 1200), fontsize=24)
     ax = CairoMakie.Axis(fig[1, 1])
     CairoMakie.lines!(ax, Eu, lgNu_mod; color = :green)
     CairoMakie.errorbars!(ax, Eu, ln_Nu_gu, ln_Nu_gu_err; color = :red)
@@ -1212,7 +1230,7 @@ function get_phys_model(logN_dV0, lognH0, Tg0, fHII0, turnFreq0, line_list)
     index_Tg = round(Int, Tg / DTg)
     fHII = fHII0 - FHII_ARRAY[1]
     index_fHII = round(Int, fHII / DFHII)
-    turnFreq = turnFreq0 - TURNOVER_FREQS[1]
+    turnFreq = turnFreq0 - EMISSION_MEASURES[1]
     index_Freq = round(Int, turnFreq / DlogFreq)
     model_index = 1 + index_logN_dV * len_nH * len_Tg * len_fHII * len_Freq + index_lognH * len_Tg * len_fHII * len_Freq + index_Tg * len_fHII * len_Freq + index_fHII * len_Freq + index_Freq
     if model_ids[model_index] == 0
@@ -1222,7 +1240,7 @@ function get_phys_model(logN_dV0, lognH0, Tg0, fHII0, turnFreq0, line_list)
 end
 
 # Get the radiative transfer model that is closest to the observed spectrum and satisfies the constraints on the flux and physical parameters
-function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, fill_fac, HII_is_at_LOS)
+function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, HII_is_at_LOS)
     function get_multidim_indices(model_index_given)
         S = model_index_given - 1
         index_logN_dV = div(S, (len_nH * len_Tg * len_fHII * len_Freq)) + 1
@@ -1234,11 +1252,6 @@ function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list
         index_fHII = div(S, len_Freq) + 1
         S %= len_Freq
         index_Freq = S + 1
-        #=if index_WHII == 1
-            #index_Te = 1
-            index_Freq = 1
-            index_fHII = 1
-        end=#
         return (
             index_logN_dV,
             index_lognH,
@@ -1252,14 +1265,11 @@ function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list
     min_diff_id = 1
     diff = 0.0
     i = 0
+    fill_fac = 1.0
     new_modelTbs = zeros(Float64, length(modelTbs[1, :]))
     for model_id in model_ids
         i += 1
         if model_id == 0
-            continue
-        end
-        new_modelTbs .= fill_fac .* modelTbs[model_id, :]
-        @views if any(abs.(new_modelTbs[absent_lines_list]) .> threshold[absent_lines_list]) || any(x -> abs(x) > max_flux, new_modelTbs[line_list])
             continue
         end
         index_logN_dV, index_lognH, index_Tg, index_fHII, index_Freq = get_multidim_indices(i)
@@ -1267,21 +1277,28 @@ function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list
         if GAS_TEMPERATURES[index_Tg] > max_Tgas || GAS_TEMPERATURES[index_Tg] > MAX_GAS_TEMPERATURE || !(MINIMUM_CLOUD_SIZE_PROJECTED_ON_SKY <= cloud_size <= MAXIMUM_CLOUD_SIZE_PROJECTED_ON_SKY) || SPECIFIC_COLUMN_DENSITIES[index_logN_dV] > MAX_SPECIFIC_COLUMN_DENSITY || (HII_is_at_LOS && index_fHII == 1) || (!HII_is_at_LOS && index_fHII > 1)
             continue
         end
-        diff = 0.0
-        for j in eachindex(line_list)
-            diff += ((new_modelTbs[line_list[j]] - obs[j]) * inv_sigma_obs[j])^2
-        end
-        if diff < min_diff
-            min_diff = diff
-            min_diff_id = i
+        for fill_fac_i in collect(0.2:0.2:1.0)
+            new_modelTbs .= fill_fac_i .* modelTbs[model_id, :]
+            @views if any(abs.(new_modelTbs[absent_lines_list]) .> threshold[absent_lines_list]) || any(x -> abs(x) > max_flux, new_modelTbs[line_list])
+                continue
+            end
+            diff = 0.0
+            for j in eachindex(line_list)
+                diff += ((new_modelTbs[line_list[j]] - obs[j]) * inv_sigma_obs[j])^2
+            end
+            if diff < min_diff
+                min_diff = diff
+                min_diff_id = i
+                fill_fac = fill_fac_i
+            end
         end
     end
     index_logN_dV, index_lognH, index_Tg, index_fHII, index_Freq = get_multidim_indices(min_diff_id)
-    return [SPECIFIC_COLUMN_DENSITIES[index_logN_dV], HDENSITIES[index_lognH], GAS_TEMPERATURES[index_Tg], FHII_ARRAY[index_fHII], TURNOVER_FREQS[index_Freq], fill_fac]
+    return [SPECIFIC_COLUMN_DENSITIES[index_logN_dV], HDENSITIES[index_lognH], GAS_TEMPERATURES[index_Tg], FHII_ARRAY[index_fHII], EMISSION_MEASURES[index_Freq], fill_fac]
 end
 
 # Estimate physical conditions using MCMC
-function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pisigma::Vector{Float64}, threshold::Vector{Float64}, line_list::Vector{Int64}, absent_lines_list::Vector{Int64}, max_Tgas::Float64, fwhm::Float64, HII_is_at_LOS::Bool, fill_fac_in::Float64 = 1.0, fill_fac_err::Float64 = Inf)
+function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pisigma::Vector{Float64}, threshold::Vector{Float64}, line_list::Vector{Int64}, absent_lines_list::Vector{Int64}, max_Tgas::Float64, fwhm::Float64, HII_is_at_LOS::Bool)
     max_flux = maximum(abs.(obs) .+ 1.0 ./ inv_sigma_obs)
     new_modelTbs = zeros(Float64, length(modelTbs[1, :]))
     function log_prob_phys(p)
@@ -1302,7 +1319,7 @@ function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pis
         if fHII0 < FHII_ARRAY[1] || fHII0 > FHII_ARRAY[end] || (HII_is_at_LOS && fHII0 <= 0.5) || (!HII_is_at_LOS && fHII0 > 0.5)
             return -Inf
         end
-        if turnFreq0 < TURNOVER_FREQS[1] || turnFreq0 > TURNOVER_FREQS[end]
+        if turnFreq0 < EMISSION_MEASURES[1] || turnFreq0 > EMISSION_MEASURES[end]
             return -Inf
         end
         if !(1.e-8 <= fill_fac <= 1.0)
@@ -1316,7 +1333,7 @@ function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pis
         index_Tg = round(Int, Tg / DTg)
         fHII = fHII0 - FHII_ARRAY[1]
         index_fHII = round(Int, fHII / DFHII)
-        turnFreq = turnFreq0 - TURNOVER_FREQS[1]
+        turnFreq = turnFreq0 - EMISSION_MEASURES[1]
         index_Freq = round(Int, turnFreq / DlogFreq)
         model_index = 1 + index_logN_dV * len_nH * len_Tg * len_fHII * len_Freq + index_lognH * len_Tg * len_fHII * len_Freq + index_Tg * len_fHII * len_Freq + index_fHII * len_Freq + index_Freq
         if model_ids[model_index] == 0
@@ -1330,10 +1347,9 @@ function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pis
         for i in eachindex(line_list)
             diff += ((new_modelTbs[line_list[i]] - obs[i]) * inv_sigma_obs[i])^2 #+ ln2pisigma[i]
         end
-        diff += ((fill_fac - fill_fac_in) / fill_fac_err)^2
         return - 0.5 * diff
     end
-    res = get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, fill_fac_in, HII_is_at_LOS)
+    res = get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, HII_is_at_LOS)
     local_rng = Random.TaskLocalRNG()
     Random.seed!(local_rng, 11051989)
     numwalkers = 2 * length(res) + 2
@@ -1422,10 +1438,6 @@ function get_physical_conditions(cell)
 
     cell.num_of_lines_to_fit = length(lines_list)
     flat_samples, cell.rhat_phys, min_pars = emcee_phys(yobs, 1.0 ./ sigmaobs, log.((2 * pi) .* (sigmaobs .* sigmaobs)), flux_limits, lines_list, absent_lines_list, max_Tgas, cell.fwhm, cell.HII_is_at_LOS)
-    fill_fac_kde = kde(flat_samples[6, :])
-    imax = findmax(fill_fac_kde.density)[2]
-    cell.fill_fac = fill_fac_kde.x[imax]
-    flat_samples, cell.rhat_phys, min_pars = emcee_phys(yobs, 1.0 ./ sigmaobs, log.((2 * pi) .* (sigmaobs .* sigmaobs)), flux_limits, lines_list, absent_lines_list, max_Tgas, cell.fwhm, cell.HII_is_at_LOS, cell.fill_fac, (percentile(@view(flat_samples[6, :]), 84) - percentile(@view(flat_samples[6, :]), 16)) * 0.5)
     
     cell.logN_dV = median(@view(flat_samples[1, :]))
     cell.lognH = median(@view(flat_samples[2, :]))
@@ -1437,23 +1449,20 @@ function get_physical_conditions(cell)
     cell.logN = cell.logN_dV + log10(cell.fwhm * 1.e5)
     #println("phys rhat $(cell.id): ", cell.rhat_phys)
     println("phys min khi2 pars $(cell.id): ", min_pars, " cloud size in AU: ", cell.cloud_size)
-    println("phys pars $(cell.id): $(cell.logN_dV), $(cell.lognH), $(cell.Tg), $(cell.fHII), $(cell.turnFreq), $(cell.fill_fac) cloud size in AU: ", cell.cloud_size)
 
     theorTb, cell.tau, cell.min_tau = get_phys_model(cell.logN_dV, cell.lognH, cell.Tg, cell.fHII, cell.turnFreq, lines_list)
     if cell.HII_is_at_LOS == false
-        #cell.Te = NaN
         cell.turnFreq = NaN
         cell.fHII = NaN
-        #cell.WHII = NaN
     end
     if isa(theorTb, Vector)
         theorTb = theorTb .* cell.fill_fac
-        fig = CairoMakie.Figure(size = (1500, 1200), fontsize=18)
+        fig = CairoMakie.Figure(size = (1500, 1200), fontsize=24)
         ax = CairoMakie.Axis(fig[1, 1])
         CairoMakie.scatter!(ax, MODEL_LINE_FREQS[lines_list], theorTb; color=:black, markersize=15)
         CairoMakie.errorbars!(ax, MODEL_LINE_FREQS[lines_list], yobs, sigmaobs; color = :red)
         ax.xlabel = "Frequency, GHz"
-        ax.ylabel = "Intensity, K"
+        ax.ylabel = "Brightness temperature, K"
         ax.title = "Cell id = $(cell.id)"
         CairoMakie.save(joinpath(DATA_DIR, "figures/fitspectra/$(cell.id).png"), fig)
     elseif isnan(theorTb)
@@ -1475,7 +1484,8 @@ function get_physical_conditions(cell)
     cell.fill_fac_err = get_phys_err(@view(flat_samples[6, :]))
 
     cell.Nrot, cell.Nrot_err, cell.Trot, cell.Trot_err, cell.fill_fac_rot, cell.fill_fac_rot_err = perform_rotational_analysis(MODEL_LINE_FREQS[lines_list] .* 1.e9, Eu_K[lines_list], Au[lines_list], gu[lines_list], abs.(Tobs_dV), Tobs_dV_err, linewidth_obs .* (3.e10 * 1.665), cell.id, cell.logN, cell.err_logN_dV + log10(cell.fwhm * 1.e5), cell.Tg, cell.err_Tg, cell.fill_fac, cell.fill_fac_err)
-    #println("phys rot pars $(cell.id): $(cell.Nrot) $(cell.Trot) $(cell.fill_fac_rot)")
+    println("phys pars $(cell.id): $(cell.logN) $(cell.logN_dV), $(cell.lognH), $(cell.Tg), $(cell.fHII), $(cell.turnFreq), $(cell.fill_fac) cloud size in AU: ", cell.cloud_size)
+    println("phys rot pars $(cell.id): $(cell.Nrot) $(cell.Trot) $(cell.fill_fac_rot)")
     #fig_phys = pairplot(flat_samples', labels=Dict(Symbol(1) => L"\log \left( N/{\Delta V} \right),\, \left[ \textrm{cm}^{-3} \textrm{s} \right]", Symbol(2) => L"\log \left( n_{\textrm{H2}} \right),\, \left[ \textrm{cm}^{-3} \right]", Symbol(3) => L"T_{g},\, \textrm{K}", Symbol(4) => L"W_{\textrm{HII}}", Symbol(5) => L"T_{e},\, \textrm{K}", Symbol(6) => L"\log \left( \textrm{EM} \right),\, \left[ \textrm{cm}^{-6}\textrm{pc} \right]"))
     #save(joinpath(DATA_DIR, "figures/corner_plot_$(cell.id).png"), fig_phys)
 end
@@ -1503,7 +1513,6 @@ function main()
     frequencies = frequencies ./ 1e9
     # Conversion factor
     from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (header["BMAJ"] * header["BMIN"] * 3600 * 3600)
-    #from_Jy_beam_to_K = 1.222e3 * 1.0e3 / (header["RESTFRQ"]^2 / 1.0e18) / (0.256446 * 0.198353)
     FITSIO.close(hdul)
 
     # Loop through the image data dimensions
@@ -1519,18 +1528,10 @@ function main()
             rms = std(spectrum_cont, corrected=true)
             spectrum[1:40] .= NaN
             spectrum[1391:1431] .= NaN
-            spec1 = spectrum[42:80]
-            max_line_flux_14_8_13_8 = maximum(abs.(spec1))
-            id_max_line_flux_14_8_13_8 = argmax(abs.(spec1))
-            spec2 = spectrum[341:394]
-            max_line_flux_14_7_13_7 = maximum(abs.(spec2))
-            id_max_line_flux_14_7_13_7 = argmax(abs.(spec2))
             spec3 = spectrum[1010:1060]
             max_line_flux_14_4_13_4 = maximum(abs.(spec3))
-            id_max_line_flux_14_4_13_4 = argmax(abs.(spec3))
             spec4 = spectrum[1150:1210]
             max_line_flux_14_3_13_3 = maximum(abs.(spec4))
-            id_max_line_flux_14_3_13_3 = argmax(abs.(spec4))
             if max_line_flux_14_4_13_4 > THRESHOLD_IN_SIGMAS * rms && max_line_flux_14_3_13_3 > THRESHOLD_IN_SIGMAS * rms
                 cells = push!(cells, Cell(cell_id, frequencies, spectrum, rms, i, j))
                 cell_id += 1
@@ -1586,7 +1587,8 @@ function main()
         image_Tgas[i, j] = one_cell.Tg ; image_errTgas[i, j] = one_cell.err_Tg
         image_fHII[i, j] = one_cell.fHII ; image_errfHII[i, j] = one_cell.err_fHII
         image_nu0[i, j] = one_cell.turnFreq ; image_errnu0[i, j] = one_cell.err_turnFreq
-        image_vlsr[i, j] = one_cell.vlsr - VLSR_IN_KMS ; image_errvlsr[i, j] = one_cell.err_vlsr
+        #image_vlsr[i, j] = one_cell.vlsr - VLSR_IN_KMS ; image_errvlsr[i, j] = one_cell.err_vlsr
+        image_vlsr[i, j] = one_cell.vlsr ; image_errvlsr[i, j] = one_cell.err_vlsr
         image_tau[i, j] = one_cell.tau
         image_mintau[i, j] = one_cell.min_tau
         image_cellid[i, j] = one_cell.id
