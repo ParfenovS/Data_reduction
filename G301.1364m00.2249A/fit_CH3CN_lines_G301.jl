@@ -16,7 +16,7 @@ using CairoMakie
 using LaTeXStrings
 
 # example of command to run the script:
-# julia -t 14 --heap-size-hint=80% --check-bounds=no fit_CH3CN_lines_G301.jl &> log.txt
+# julia -t 14 --heap-size-hint=80% --check-bounds=no fit_CH3CN_lines_G301.jl &> log.txt 
 
 Random.seed!(11051989)
 
@@ -32,10 +32,11 @@ const MOLECULAR_MASS = 41.05 # g/mol
 
 const THRESHOLD_IN_SIGMAS = 5
 const MIN_LINE_FWHM_IN_KMS = 1.5
-const MAX_LINE_FWHM_IN_KMS = 3.0
-const VLSR_IN_KMS = -39.3
+const MAX_LINE_FWHM_IN_KMS = 6.0
+const VLSR_IN_KMS = -39.5
 const MIN_ALLOWED_LINE_VEL_WRT_VLSR_KMS = -18
 const MAX_ALLOWED_LINE_VEL_WRT_VLSR_KMS = 18
+const MAX_NUM_OF_GUASSIAN_COMPONENTS_PER_LINE = 2
 const LINE_VERTICAL_LABELS = OrderedDict("14_8->13_8" => 257.2108775, "14_7->13_7" => 257.2849354, "14_6->13_6" => 257.3491798, "14_4->13_4" => 257.4481282, "14_3->13_3" => 257.4827919, "14_2->13_2" => 257.5075619, "14_1->13_1" => 257.5224279, "14_0->13_0" => 257.5273839)
 const INDEXES_OF_LINES_THAT_WILL_BE_SELECTED_BASED_ON_VLSR_BUT_NOT_ON_INTENSITY = [5]
 const MODEL_FREQ_INDEXES_TO_NOT_INCLUDE_IN_ABSENT_LINE_LIST = []
@@ -50,7 +51,7 @@ const HDENSITIES0 = collect(3.0:0.05:10.0) # [log cm^-3]
 const GAS_TEMPERATURES = collect(20:2:620) # [K]
 const SPECIFIC_COLUMN_DENSITIES = collect(8.5:0.05:14.6) # [log cm^-3 s]
 const FHII_ARRAY = [0.0, 1.0]
-const EMISSION_MEASURES = collect(7.0:0.5:11.0) # [log pc cm^-6]
+const EMISSION_MEASURES = collect(7.0:0.5:11.0) # [pc cm^-6]
 const MOLECULAR_ABUNDANCE = 1.e-6 # wrt H2
 const MINIMUM_CLOUD_SIZE_PROJECTED_ON_SKY = 100. * 1.496e+13 # [cm]
 const MAXIMUM_CLOUD_SIZE_PROJECTED_ON_SKY = 1.0 * 3.086e+18 # [cm]
@@ -196,9 +197,6 @@ const modelTaus = open(joinpath(DATA_DIR, "modelTaus_G301_fWHII.jls"), "r") do f
     deserialize(file)
 end
 
-#const modelTbs = zeros(2, 2)
-#const modelTaus = zeros(2, 2)
-
 function one_to_two_dim(index)
     # Calculate row and column indices based on 1-based indexing
     row = ceil(Int, index / 3)
@@ -278,12 +276,14 @@ mutable struct Cell
     gaussians::Vector{LineProfileModel}
     all_gaussians::Vector{LineProfileModel}
     num_of_lines_to_fit::Int
+    vel_diff_between_components::Float64
+    vel_diff_between_components_err::Float64
 
     function Cell(id::Int64, freqs::Vector{Float64}, obs_spec_in::Vector{Float64}, rms::Float64, x::Int64, y::Int64)
         first_non_nan_index = findfirst(!isnan, obs_spec_in)
         freqs = freqs[first_non_nan_index:end]
         obs_spec = obs_spec_in[first_non_nan_index:end]
-        new(id, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, true, x, y, rms, VLSR_IN_KMS, NaN, freqs, obs_spec, Any, Any, Float64[], Float64[], LineProfileModel[], LineProfileModel[], 0)
+        new(id, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, true, x, y, rms, VLSR_IN_KMS, NaN, freqs, obs_spec, Any, Any, Float64[], Float64[], LineProfileModel[], LineProfileModel[], 0, NaN, NaN)
     end
 end
 
@@ -779,8 +779,8 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
                 for j in 1:3
                     p0[id_p0] = res_models_copy[i].p[j]
                     if j == 1
-                        l[id_p0] = max(2 * rms, res_models[i].p[j] - rms)
-                        u[id_p0] = min(max_obs_Y + rms, res_models[i].p[j] + rms)
+                        l[id_p0] = max(2 * rms, res_models_copy[i].p[j] - rms)
+                        u[id_p0] = min(max_obs_Y + rms, res_models_copy[i].p[j] + rms)
                     end
                     if j == 2
                         l[id_p0] = res_models_copy[i].p[j] - 3 * res_models_copy[i].p[3]
@@ -834,6 +834,65 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
                 if length(res_models) > 0 
                     models_were_removed = true
                 end
+            end
+        end
+        if obs_X0[1] <= LINE_VERTICAL_LABELS["14_1->13_1"] * (1 - VLSR_IN_KMS / 3.e5) <= obs_X0[end] || obs_X0[1] <= LINE_VERTICAL_LABELS["14_0->13_0"] * (1 - VLSR_IN_KMS / 3.e5) <= obs_X0[end]
+            max_num_of_models = 2 * MAX_NUM_OF_GUASSIAN_COMPONENTS_PER_LINE
+            if length(res_models) == 2 * MAX_NUM_OF_GUASSIAN_COMPONENTS_PER_LINE - 1
+                max_num_of_models = MAX_NUM_OF_GUASSIAN_COMPONENTS_PER_LINE
+            end
+        else
+            max_num_of_models = MAX_NUM_OF_GUASSIAN_COMPONENTS_PER_LINE
+        end
+        max_num_of_models = min(max_num_of_models, length(res_models))
+        if length(res_models) > 0
+            res_models_copy = sort!(res_models_copy, by = x -> abs(x.p[1]), rev=true)
+            id_of_model_to_include = 1
+            need_to_add_models = true
+            while need_to_add_models
+                res_models = deepcopy(res_models_copy[1:id_of_model_to_include])
+                res_models = sort!(res_models, by = x -> x.p[2])
+                p0 = zeros(length(res_models) * 3)
+                id_p0 = 1
+                l = zeros(length(res_models) * 3)
+                u = zeros(length(res_models) * 3)
+                for i in eachindex(res_models)
+                    for j in 1:3
+                        p0[id_p0] = res_models[i].p[j]
+                        if j == 1
+                            l[id_p0] = max(2 * rms, res_models[i].p[j] - rms)
+                            u[id_p0] = min(max_obs_Y + rms, res_models[i].p[j] + rms)
+                        end
+                        if j == 2
+                            l[id_p0] = res_models[i].p[j] - 3 * res_models[i].p[3]
+                            u[id_p0] = res_models[i].p[j] + 3 * res_models[i].p[3]
+                        end
+                        if j == 3
+                            p0[id_p0] = mean_line_width
+                            l[id_p0] = min_doppler_b
+                            u[id_p0] = max_doppler_b
+                        end
+                        if p0[id_p0] <= l[id_p0]
+                            p0[id_p0] = l[id_p0] * 1.0001
+                        end
+                        if p0[id_p0] >= u[id_p0]
+                            p0[id_p0] = u[id_p0] * 0.9999
+                        end
+                        id_p0 += 1
+                    end
+                end
+                result = minimize_gauss_blend(iblend.obs_X, iblend.obs_Y, length(res_models), p0, l, u, rms)
+                total_model = zeros(length(iblend.obs_X))
+                for i in eachindex(res_models)
+                    for j in 1:3
+                        res_models[i].p[j] = result[3 * (i-1) + j]
+                    end
+                    total_model .+= gauss_profile(iblend.obs_X, res_models[i].p)
+                end
+                if maximum(abs.(iblend.obs_Y - total_model)) < threshold || id_of_model_to_include == max_num_of_models
+                    need_to_add_models = false
+                end
+                id_of_model_to_include += 1
             end
         end
         # Get the fit errors using Monte-Carlo Markov Chain method
@@ -915,6 +974,7 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
             #CairoMakie.errorbars!(axs, [model.p[2]], [model.p[1]], [model.err_p[1]]; color = :red)
         end
     end
+    #ymax = axs.finallimits[].origin[2] + axs.finallimits[].widths[2]
     
     ymax = maximum(obs_Y0)
     if HII_is_at_LOS
@@ -925,9 +985,9 @@ function fit_spectrum_with_gaussians(obs_X0, obs_Y0, rms, threshold, fig, fig_ro
             #CairoMakie.vlines!(axs, [LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5)], color = :black, linestyle = :dot)
             line_K = get_K_from_line_label(key)
             #CairoMakie.text!(axs, LINE_VERTICAL_LABELS[key] * (1 - VLSR_IN_KMS / 3.e5), ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 14, rotation = 0, space = :data)
-            if LINE_VERTICAL_LABELS[key] == 257.5273839
-                CairoMakie.vlines!(axs, [VLSR_IN_KMS + (257.5273839-257.5224279)/257.5273839*3.e5], color = :black, linestyle = :dot)
-                CairoMakie.text!(axs, VLSR_IN_KMS + (257.5273839-257.5224279)/257.5273839*3.e5, ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 18, rotation = 0, space = :data)
+            if key == "14_0->13_0"
+                CairoMakie.vlines!(axs, [VLSR_IN_KMS + (LINE_VERTICAL_LABELS[key]-LINE_VERTICAL_LABELS["14_1->13_1"])/LINE_VERTICAL_LABELS[key]*3.e5], color = :black, linestyle = :dot)
+                CairoMakie.text!(axs, VLSR_IN_KMS + (LINE_VERTICAL_LABELS[key]-LINE_VERTICAL_LABELS["14_1->13_1"])/257.5273839*3.e5, ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 18, rotation = 0, space = :data)
             else
                 CairoMakie.vlines!(axs, [VLSR_IN_KMS], color = :black, linestyle = :dot)
                 CairoMakie.text!(axs, VLSR_IN_KMS, ymax * 1.1, text = latexstring("\$K = $(line_K)\$"), fontsize = 18, rotation = 0, space = :data)
@@ -942,6 +1002,7 @@ function get_needed_gaussians_and_vlsr(models)
     needed_gaussians = []
     individual_vlsr = []
     individual_vlsr_err = []
+    vel_diff_between_models = []
     line_label_id = 0
     for (line_label, freq0) in LINE_VERTICAL_LABELS
         line_label_id += 1
@@ -1013,6 +1074,9 @@ function get_needed_gaussians_and_vlsr(models)
         if length(closest_models_ids) == 0
             continue
         end
+        if length(closest_models_ids) == 2
+            push!(vel_diff_between_models, abs( (freq0 / models[closest_models_ids[1]].p[2] - 1) * 3e5 - (freq0 / models[closest_models_ids[2]].p[2] - 1) * 3e5 ))
+        end
         model_id_with_max_peak = argmax([abs(x.p[1]) for x in models[closest_models_ids]])
         models[closest_models_ids[model_id_with_max_peak]].freq = freq0
         line_vlsr = (freq0 / models[closest_models_ids[model_id_with_max_peak]].p[2] - 1) * 3e5
@@ -1080,7 +1144,7 @@ function get_needed_gaussians_and_vlsr(models)
         needed_gaussians = sort!(needed_gaussians, by = x -> x.p[2])
     end
 
-    return needed_gaussians, mean_vlsr, vlsr_err, vlsr_max_diff
+    return needed_gaussians, mean_vlsr, vlsr_err, vlsr_max_diff, vel_diff_between_models
 end
 
 function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
@@ -1088,6 +1152,7 @@ function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
     fig = figs[1, 1] = CairoMakie.GridLayout()
     gaussians = []
     all_gaussians = []
+    vel_diff_between_models = []
     plot_id = 1
     max_row = 1
     axes_arr = []
@@ -1122,7 +1187,7 @@ function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
     end
     gaussians, mean_vlsr, err_vlsr, max_vlsr_diff = Vector{LineProfileModel}(), NaN, NaN, NaN
     if length(all_gaussians) > 0
-        gaussians, mean_vlsr, err_vlsr, max_vlsr_diff = get_needed_gaussians_and_vlsr(all_gaussians)
+        gaussians, mean_vlsr, err_vlsr, max_vlsr_diff, vel_diff_between_models = get_needed_gaussians_and_vlsr(all_gaussians)
     else
         println("#warning no lines found in cell $cell_id")
     end
@@ -1135,7 +1200,7 @@ function get_gaussians(obs_lines_freq, obs_lines, rms, cell_id)
         axes_arr[1].title = "Cell id = $cell_id"
     end
     CairoMakie.save(joinpath(DATA_DIR, "figures/spectra/$cell_id.png"), figs)
-    return gaussians, all_gaussians, mean_vlsr, err_vlsr, max_vlsr_diff, HII_is_at_LOS
+    return gaussians, all_gaussians, mean_vlsr, err_vlsr, max_vlsr_diff, HII_is_at_LOS, vel_diff_between_models
 end
 
 # Fit rotational diagram
@@ -1210,14 +1275,14 @@ function perform_rotational_analysis(freq::Vector{Float64}, Eu::Vector{Float64},
 
     lgNu_mod, ln_Nu_gu, ln_Nu_gu_err = get_model_and_obs_lnNu_gu(res_modified[1], res_modified[2], res_modified[3])
 
-    fig = CairoMakie.Figure(size = (1500, 1200), fontsize=24)
+    fig = CairoMakie.Figure(size = (1500, 1200), fontsize=48)
     ax = CairoMakie.Axis(fig[1, 1])
     CairoMakie.lines!(ax, Eu, lgNu_mod; color = :green)
     CairoMakie.errorbars!(ax, Eu, ln_Nu_gu, ln_Nu_gu_err; color = :red)
     ax.xlabel = "Upper level energy, K"
     ax.ylabel = "ln(Nu/g)"
-    ax.title = "Cell id = $(cell_id)"
-    CairoMakie.save(joinpath(DATA_DIR, "figures/rot_diagram/$(cell_id).png"), fig)
+    #ax.title = "Cell id = $(cell_id)"
+    CairoMakie.save(joinpath(DATA_DIR, "figures/rot_diagram/$(cell_id).eps"), fig)
     return res_modified[1], (res_modified_u[1] - res_modified_l[1]) * 0.5, res_modified[2], (res_modified_u[2] - res_modified_l[2]) * 0.5, res_modified[3], (res_modified_u[3] - res_modified_l[3]) * 0.5
 end
 
@@ -1240,7 +1305,7 @@ function get_phys_model(logN_dV0, lognH0, Tg0, fHII0, turnFreq0, line_list)
 end
 
 # Get the radiative transfer model that is closest to the observed spectrum and satisfies the constraints on the flux and physical parameters
-function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, HII_is_at_LOS)
+function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, fill_fac, HII_is_at_LOS)
     function get_multidim_indices(model_index_given)
         S = model_index_given - 1
         index_logN_dV = div(S, (len_nH * len_Tg * len_fHII * len_Freq)) + 1
@@ -1265,7 +1330,6 @@ function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list
     min_diff_id = 1
     diff = 0.0
     i = 0
-    fill_fac = 1.0
     new_modelTbs = zeros(Float64, length(modelTbs[1, :]))
     for model_id in model_ids
         i += 1
@@ -1298,10 +1362,11 @@ function get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list
 end
 
 # Estimate physical conditions using MCMC
-function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pisigma::Vector{Float64}, threshold::Vector{Float64}, line_list::Vector{Int64}, absent_lines_list::Vector{Int64}, max_Tgas::Float64, fwhm::Float64, HII_is_at_LOS::Bool)
+function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pisigma::Vector{Float64}, threshold::Vector{Float64}, line_list::Vector{Int64}, absent_lines_list::Vector{Int64}, max_Tgas::Float64, fwhm::Float64, HII_is_at_LOS::Bool, fill_fac_in::Float64 = 1.0, fill_fac_err::Float64 = Inf)
     max_flux = maximum(abs.(obs) .+ 1.0 ./ inv_sigma_obs)
     new_modelTbs = zeros(Float64, length(modelTbs[1, :]))
     function log_prob_phys(p)
+        #logN_dV0, lognH0, Tg0, WHII0, Te0, turnFreq0 = p[1], p[2], p[3], p[4], p[5], p[6]
         logN_dV0, lognH0, Tg0, fHII0, turnFreq0, fill_fac = p[1], p[2], p[3], p[4], p[5], p[6]
         cloud_size = 10^(logN_dV0 - lognH0) * fwhm * CLOUD_SIZE_FACTOR
         if logN_dV0 < SPECIFIC_COLUMN_DENSITIES[1] || logN_dV0 > SPECIFIC_COLUMN_DENSITIES[end] || logN_dV0 > MAX_SPECIFIC_COLUMN_DENSITY
@@ -1349,7 +1414,7 @@ function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pis
         end
         return - 0.5 * diff
     end
-    res = get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, HII_is_at_LOS)
+    res = get_closest_phys_model(obs, inv_sigma_obs, line_list, absent_lines_list, threshold, max_Tgas, fwhm, fill_fac_in, HII_is_at_LOS)
     local_rng = Random.TaskLocalRNG()
     Random.seed!(local_rng, 11051989)
     numwalkers = 2 * length(res) + 2
@@ -1371,7 +1436,6 @@ function emcee_phys(obs::Vector{Float64}, inv_sigma_obs::Vector{Float64}, ln2pis
     end
     chain = sample(log_prob_phys, numwalkers, p0, burnin, 1, rng=local_rng)
     chain = sample(log_prob_phys, numwalkers, chain[end, :, :], numsamples_perwalker, 1, rng=local_rng)
-    #return flattenmcmcarray(chain), rhat(chain), res
     return flattenmcmcarray(chain), [], res
 end
 
@@ -1457,14 +1521,14 @@ function get_physical_conditions(cell)
     end
     if isa(theorTb, Vector)
         theorTb = theorTb .* cell.fill_fac
-        fig = CairoMakie.Figure(size = (1500, 1200), fontsize=24)
+        fig = CairoMakie.Figure(size = (1500, 1200), fontsize=48)
         ax = CairoMakie.Axis(fig[1, 1])
         CairoMakie.scatter!(ax, MODEL_LINE_FREQS[lines_list], theorTb; color=:black, markersize=15)
         CairoMakie.errorbars!(ax, MODEL_LINE_FREQS[lines_list], yobs, sigmaobs; color = :red)
         ax.xlabel = "Frequency, GHz"
         ax.ylabel = "Brightness temperature, K"
-        ax.title = "Cell id = $(cell.id)"
-        CairoMakie.save(joinpath(DATA_DIR, "figures/fitspectra/$(cell.id).png"), fig)
+        #ax.title = "Cell id = $(cell.id)"
+        CairoMakie.save(joinpath(DATA_DIR, "figures/fitspectra/$(cell.id).eps"), fig)
     elseif isnan(theorTb)
         println("#warning bad model for $(cell.id): ", theorTb)
         cell.logN_dV = NaN ; cell.lognH = NaN ; cell.Tg = NaN ; cell.fill_fac = NaN
@@ -1483,16 +1547,24 @@ function get_physical_conditions(cell)
     cell.err_turnFreq = get_phys_err(@view(flat_samples[5, :]))
     cell.fill_fac_err = get_phys_err(@view(flat_samples[6, :]))
 
-    cell.Nrot, cell.Nrot_err, cell.Trot, cell.Trot_err, cell.fill_fac_rot, cell.fill_fac_rot_err = perform_rotational_analysis(MODEL_LINE_FREQS[lines_list] .* 1.e9, Eu_K[lines_list], Au[lines_list], gu[lines_list], abs.(Tobs_dV), Tobs_dV_err, linewidth_obs .* (3.e10 * 1.665), cell.id, cell.logN, cell.err_logN_dV + log10(cell.fwhm * 1.e5), cell.Tg, cell.err_Tg, cell.fill_fac, cell.fill_fac_err)
-    println("phys pars $(cell.id): $(cell.logN) $(cell.logN_dV), $(cell.lognH), $(cell.Tg), $(cell.fHII), $(cell.turnFreq), $(cell.fill_fac) cloud size in AU: ", cell.cloud_size)
-    println("phys rot pars $(cell.id): $(cell.Nrot) $(cell.Trot) $(cell.fill_fac_rot)")
+    println("phys pars $(cell.id): $(cell.logN) $(cell.logN_dV)+-$(cell.err_logN_dV), $(cell.lognH)+-$(cell.err_lognH), $(cell.Tg)+-$(cell.err_Tg), $(cell.fHII)+-$(cell.err_fHII), $(cell.turnFreq)+-$(cell.err_turnFreq), $(cell.fill_fac)+-$(cell.fill_fac_err) cloud size in AU: ", cell.cloud_size)
+    if !(cell.HII_is_at_LOS)
+        cell.Nrot, cell.Nrot_err, cell.Trot, cell.Trot_err, cell.fill_fac_rot, cell.fill_fac_rot_err = perform_rotational_analysis(MODEL_LINE_FREQS[lines_list] .* 1.e9, Eu_K[lines_list], Au[lines_list], gu[lines_list], abs.(Tobs_dV), Tobs_dV_err, linewidth_obs .* (3.e10 * 1.665), cell.id, cell.logN, cell.err_logN_dV + log10(cell.fwhm * 1.e5), cell.Tg, cell.err_Tg, cell.fill_fac, cell.fill_fac_err)
+        println("phys rot pars $(cell.id): $(cell.Nrot)+-$(cell.Nrot_err) $(cell.Trot)+-$(cell.Trot_err) $(cell.fill_fac_rot)+-$(cell.fill_fac_rot_err)")
+    end
     #fig_phys = pairplot(flat_samples', labels=Dict(Symbol(1) => L"\log \left( N/{\Delta V} \right),\, \left[ \textrm{cm}^{-3} \textrm{s} \right]", Symbol(2) => L"\log \left( n_{\textrm{H2}} \right),\, \left[ \textrm{cm}^{-3} \right]", Symbol(3) => L"T_{g},\, \textrm{K}", Symbol(4) => L"W_{\textrm{HII}}", Symbol(5) => L"T_{e},\, \textrm{K}", Symbol(6) => L"\log \left( \textrm{EM} \right),\, \left[ \textrm{cm}^{-6}\textrm{pc} \right]"))
     #save(joinpath(DATA_DIR, "figures/corner_plot_$(cell.id).png"), fig_phys)
 end
 
 function process_cell(cell::Cell)
     cell.obs_lines_freq, cell.obs_lines = separate_non_nan_ranges(cell.freqs, cell.obs_spec)
-    cell.gaussians, cell.all_gaussians, cell.vlsr, cell.err_vlsr, cell.max_vlsr_diff, cell.HII_is_at_LOS = get_gaussians(cell.obs_lines_freq, cell.obs_lines, cell.rms, cell.id)
+    cell.gaussians, cell.all_gaussians, cell.vlsr, cell.err_vlsr, cell.max_vlsr_diff, cell.HII_is_at_LOS, vel_diff_between_models = get_gaussians(cell.obs_lines_freq, cell.obs_lines, cell.rms, cell.id)
+    if length(vel_diff_between_models) > 0
+        cell.vel_diff_between_components = mean(vel_diff_between_models)
+        if length(vel_diff_between_models) > 1
+            cell.vel_diff_between_components_err = std(vel_diff_between_models)
+        end
+    end
     get_physical_conditions(cell)
 end
 
@@ -1567,6 +1639,7 @@ function main()
     image_max_vlsr_diff = copy(image_data[:, :, 1]) ; image_max_vlsr_diff .= NaN
     image_rmsT = copy(image_data[:, :, 1]) ; image_rmsT .= NaN
     image_fillfac = copy(image_data[:, :, 1]) ; image_fillfac .= NaN
+    image_vel_diff_between_components = copy(image_data[:, :, 1]) ; image_vel_diff_between_components .= NaN
 
     image_errNdV = copy(image_data[:, :, 1]) ; image_errNdV .= NaN
     image_errNrot = copy(image_data[:, :, 1]) ; image_errNrot .= NaN
@@ -1577,6 +1650,7 @@ function main()
     image_errTrot = copy(image_data[:, :, 1]) ; image_errTrot .= NaN
     image_errvlsr = copy(image_data[:, :, 1]) ; image_errvlsr .= NaN
     image_errfillfac = copy(image_data[:, :, 1]) ; image_errfillfac .= NaN
+    image_errvel_diff_between_components = copy(image_data[:, :, 1]) ; image_errvel_diff_between_components .= NaN
 
     for one_cell in cells
         i = one_cell.x
@@ -1600,6 +1674,7 @@ function main()
         image_N_rot[i, j] = one_cell.Nrot ; image_errNrot[i, j] = one_cell.Nrot_err
         image_T_rot[i, j] = one_cell.Trot ; image_errTrot[i, j] = one_cell.Trot_err
         image_fillfac[i, j] = one_cell.fill_fac ; image_errfillfac[i, j] = one_cell.fill_fac_err
+        image_vel_diff_between_components[i, j] = one_cell.vel_diff_between_components ; image_errvel_diff_between_components[i, j] = one_cell.vel_diff_between_components_err
     end
 
     function write_into_fits_file(arr, name, input_header)
@@ -1664,6 +1739,9 @@ function main()
     header_to_write["BTYPE"] = "filling factor"
     header_to_write["BUNIT"] = "omega"
     write_into_fits_file(image_fillfac, "image_FillFacT_G301.fits", header_to_write)
+    header_to_write["BTYPE"] = "Velocity difference between components"
+    header_to_write["BUNIT"] = "km/s"
+    write_into_fits_file(image_vel_diff_between_components, "image_vel_diff_between_components_G301.fits", header_to_write)
 
     header_to_write["BTYPE"] = "error log(N/dV)"
     header_to_write["BUNIT"] = "[cm^-3 s]"
@@ -1692,6 +1770,10 @@ function main()
     header_to_write["BTYPE"] = "filling factor error"
     header_to_write["BUNIT"] = "omega"
     write_into_fits_file(image_errfillfac, "image_errFillFacT_G301.fits", header_to_write)
+    header_to_write["BTYPE"] = "Error of velocity difference between components"
+    header_to_write["BUNIT"] = "km/s"
+    write_into_fits_file(image_errvel_diff_between_components, "image_errvel_diff_between_components_G301.fits", header_to_write)
+
 end
 
 main()
